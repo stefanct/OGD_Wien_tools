@@ -1,29 +1,33 @@
 #!/usr/bin/python
 #
-# prepares the bicycle parking POIs of OGD Wien for use with OSM applications.
+# Prepares the bicycle parking POIs of OGD Wien for use with OSM applications.
+#
+# It looks for the zip file containing the ERSI Shapefile in the working directory (wd)
+# and downloads it from wien.at if necessary. It then extracts it and tries to use
+# ogr2osm to convert it into an OSM XML file (to be put in the CWD).
+# If ogr2osm is not available it uses the ogr library directly to do the translation
+# of the tags in the Shapefile only. This is good enough for josm...
 #
 # Written by Stefan Tauner, GPL3+ (if anyone asks)
 
 import ogr, zipfile, shutil, os, sys, urllib2, subprocess
 
+ogr2osm_path = "ogr2osm/ogr2osm.py"
+wd = "wd/" # the working directory
+url = "http://data.wien.gv.at/daten/geoserver/ows?service=WFS&request=GetFeature&version=1.1.0&typeName=ogdwien:FAHRRADABSTELLANLAGEOGD&srsName=EPSG:4326&outputFormat=shape-zip"
+
+base_name = "FAHRRADABSTELLANLAGEOGD"
+zipname = wd + base_name + ".zip"
+orig = "orig/"
+trans = "trans/"
+in_file = wd + orig + base_name + ".shp"
+
 def main():
-	ogr.UseExceptions()
-	# There is an API call for this, but the python binding seems to be broken :/
-	def cloneFieldDefn(src_def):
-		fdef = ogr.FieldDefn(src_fd.GetName(), src_fd.GetType())
-		fdef.SetWidth(src_fd.GetWidth())
-		fdef.SetPrecision(src_fd.GetPrecision())
-		return fdef
-
-	ogr2osm_path = "ogr2osm/"
-	wd = "wd/" # the working directory
-	url = "http://data.wien.gv.at/daten/geoserver/ows?service=WFS&request=GetFeature&version=1.1.0&typeName=ogdwien:FAHRRADABSTELLANLAGEOGD&srsName=EPSG:4326&outputFormat=shape-zip"
-
-	base_name = "FAHRRADABSTELLANLAGEOGD"
-	zipname = base_name + ".zip"
-	tbl = "conv"
-	in_file = wd + "/orig/" + base_name + ".shp"
-	out_file = wd + tbl + '/' + base_name + ".shp"
+	if not os.path.exists(wd):
+		os.makedirs(wd)
+	# get rid of previous converts
+	shutil.rmtree(wd + orig, True)
+	shutil.rmtree(wd + trans, True)
 
 	if not os.path.exists(zipname):
 		print "Zip file not there, downloading it"
@@ -38,27 +42,51 @@ def main():
 	else:
 		print "Using existing zip file"
 
-	# get rid of previous converts
-	shutil.rmtree(wd, True)
-
 	# extract source zip
 	try:
 		with zipfile.ZipFile(zipname, 'r') as zip:
-			zip.extractall(wd + "orig")
+			zip.extractall(wd + orig)
 	except Exception as e:
 		print "Could not extract '%s':" % zipname
 		exit(e)
 
+	if find_ogr2osm(ogr2osm_path) != None:
+		cli = ["python", ogr2osm_path, in_file, "--epsg=4326", "-f", "--encoding=ISO-8859-15"]
+		print "Calling ogr2osm with '%s'" % ' '.join(cli)
+		try:
+			p = subprocess.Popen(cli, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+			out, bla = p.communicate()
+		except Exception as e:
+			print "ogr2osm failed:"
+			exit(e)
+		if p.returncode != 0:
+			print "ogr2osm failed, output was:"
+			print out,
+	else:
+		transform()
+		print "You need to create the OSM XML yourself, sorry."
+	print "Done."
+
+def transform():
+	ogr.UseExceptions()
+	# There is an API call for this, but the python binding seems to be broken :/
+	def cloneFieldDefn(src_def):
+		fdef = ogr.FieldDefn(src_fd.GetName(), src_fd.GetType())
+		fdef.SetWidth(src_fd.GetWidth())
+		fdef.SetPrecision(src_fd.GetPrecision())
+		return fdef
+
+	out_file = wd + trans + base_name + ".shp"
+
 	# open original shapefile and copy it to new datasource
 	try:
 		drv = ogr.GetDriverByName("ESRI Shapefile")
-		orig = drv.Open(in_file, 0)
+		ds = drv.CopyDataSource(drv.Open(in_file, 0), wd + trans)
 	except Exception as e:
 		print("Could not load input file: %s" % in_file)
 		exit(e)
 	print "Shapefile loaded successfully"
 
-	ds = drv.CopyDataSource(orig, wd + tbl)
 	layer = ds.GetLayer()
 	layerdef = layer.GetLayerDefn()
 
@@ -83,29 +111,12 @@ def main():
 
 	ds.SyncToDisk()
 	ds.Destroy()
-	print "Transformation done"
+	print "Transformation done. The converted files can be found in '%s'." % os.path.dirname(out_file)
 
-	if find_ogr2osm(ogr2osm_path) != None:
-		print "Calling ogr2osm"
-		try:
-			p = subprocess.Popen(["python", ogr2osm_path + "ogr2osm.py", out_file, "-e", "4326", "-f"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-			out, bla = p.communicate()
-		except Exception as e:
-			print "ogr2osm failed:"
-			exit(e)
-		if p.returncode != 0:
-			print "ogr2osm failed, output was:"
-			print out,
-	else:
-		print "You need to create the OSM XML yourself, sorry."
-		print "The converted files can be found in '%s'." % os.path.dirname(out_file)
-	print "Done."
-
-def find_ogr2osm(ogr2osm_path):
-	path = ogr2osm_path + "ogr2osm.py"
+def find_ogr2osm(path):
 	if not os.path.exists(path):
 		print "ogr2osm.py not found, trying with git"
-		ret = subprocess.call("git submodule update --init", shell=True)
+		ret = subprocess.call("git submodule update --init --recursive", shell=True)
 		if not os.path.exists(path):
 			print "nope"
 			return None
